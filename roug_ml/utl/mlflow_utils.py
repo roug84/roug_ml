@@ -79,10 +79,11 @@ def get_or_create_experiment(name):
     if experiment is None:
         # The experiment does not exist, create a new one
         experiment_id = mlflow.create_experiment(name)
-        print("Experiment created")
+        print("Experiment created with id: ", experiment_id)
     else:
         # The experiment exists, get its ID
         experiment_id = experiment.experiment_id
+        print("Experiment loaded with id: ", experiment_id)
 
     return experiment_id
 
@@ -94,6 +95,7 @@ def load_top_models(top_n_runs: List[Tuple[str, dict]]) -> List:
     :param top_n_runs: A list of tuples, each containing the ID of a run and the parameters of that run.
     :return: A list of loaded models.
     """
+
     loaded_models = []
     for run in top_n_runs:
         run_id, _ = run  # We are only interested in the run ID for loading

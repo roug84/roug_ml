@@ -38,15 +38,14 @@ def download_file(in_url: str, file_path: str) -> None:
 
     :returns: None
     """
-    create_dir(os.path.dirname(file_path))
     response = requests.get(in_url, stream=True)
-    response.raise_for_status()
+    if response.status_code == 200 and not os.path.exists(file_path):
+        create_dir(os.path.dirname(file_path))
+        with open(file_path, "wb") as file:
+            for chunk in response.iter_content(chunk_size=8192):
+                file.write(chunk)
 
-    with open(file_path, "wb") as file:
-        for chunk in response.iter_content(chunk_size=8192):
-            file.write(chunk)
-
-    print(f"File downloaded from {in_url} to {file_path}")
+        print(f"File downloaded from {in_url} to {file_path}")
 
     # Example usage:
     # download_file("https://example.com/path/to/file.zip", "/path/to/your/directory/file.zip")

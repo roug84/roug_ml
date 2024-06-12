@@ -12,6 +12,7 @@ from beartype.typing import List, Dict, Tuple, Optional, Union
 from sklearn.base import BaseEstimator, TransformerMixin
 from roug_ml.models.pipelines.pytorch_nn_pipeline import NNTorch
 from roug_ml.utl.evaluation.eval_utl import calc_loss_acc_val
+from roug_ml.utl.mlflow_utils import get_or_create_experiment
 
 import numpy as np
 import os
@@ -21,6 +22,8 @@ import torch
 import random
 from roug_ml.utl.set_seed import set_seed
 from roug_ml.utl.parameter_utils import flatten_dict
+from roug_ml.configs.my_paths import MLFLOW_ENV_PATH
+from dotenv import load_dotenv
 
 os.environ["PYTHONHASHSEED"] = "0"
 np.random.seed(123)
@@ -32,7 +35,6 @@ if torch.cuda.is_available():
 
 set_seed(42)
 
-
 def parallele_hyper_optim(
     in_num_workers: int,
     x_train: np.ndarray,
@@ -43,7 +45,10 @@ def parallele_hyper_optim(
     in_framework: str,
     model_save_path: str,
     in_mlflow_experiment_id: str,
+    in_mlflow_experiment_name: str,
     use_kfold: bool = False,
+    dataset=None,
+    data_collator=None,
     in_scaler: Optional[Union[BaseEstimator, TransformerMixin]] = None,
     in_selector: Optional[Union[BaseEstimator, TransformerMixin]] = None,
 ) -> List[Tuple[dict, float]]:
@@ -59,7 +64,9 @@ def parallele_hyper_optim(
                              the optimization process will search.
     :param in_framework: Framework to use for optimization ('tf' or 'torch').
     :param model_save_path: Path where the trained models will be saved.
-    :param in_mlflow_experiment_id: Name of the MLFlow experiment to log the optimization
+    :param in_mlflow_experiment_id: id of the MLFlow experiment to log the optimization
+                                      results.
+    :param in_mlflow_experiment_name: Name of the MLFlow experiment to log the optimization
                                       results.
     :param use_kfold: If True, apply K-Fold Cross Validation during the optimization process.
                       Default is False.
@@ -76,8 +83,10 @@ def parallele_hyper_optim(
                 y=y,
                 train_loader=params_outer,
                 k_folds=5,
+                dataset=dataset,
                 model_save_path=model_save_path,
-                in_mlflow_experiment_name=in_mlflow_experiment_id,
+                in_mlflow_experiment_id=in_mlflow_experiment_id,
+                in_mlflow_experiment_name=in_mlflow_experiment_name,
                 in_scaler=in_scaler,
                 in_selector=in_selector,
             )
@@ -86,23 +95,18 @@ def parallele_hyper_optim(
     else:
         # Perform parallel processing for Torch framework
         # return Parallel(n_jobs=in_num_workers)(
-        #     delayed(process_params_torch)(params_outer, x_train, y, x_val, y_val, train_loader,
-        #                                   val_loader, model_save_path, in_mlflow_experiment_id
+        #     delayed(process_params_torch)(params_outer, x_train, y, x_val, y_val, model_save_path,
+        #                                   in_mlflow_experiment_id, use_kfold, dataset,
+        #                                    None, in_scaler, in_selector
         #                                   )
         #     for params_outer in param_grid_outer
         # )
         results = []
         for params_outer in param_grid_outer:
             result = process_params_torch(
-                params_outer,
-                x_train,
-                y,
-                x_val,
-                y_val,
-                model_save_path,
-                in_mlflow_experiment_id,
-                in_scaler=in_scaler,
-                in_selector=in_selector,
+                params_outer, x_train, y, x_val, y_val, model_save_path,
+                in_mlflow_experiment_id, in_mlflow_experiment_name, use_kfold, dataset, data_collator,
+                None, in_scaler, in_selector
             )
             results.append(result)
         # result = process_params_torch(param_grid_outer, x_train, y, x_val, y_val,
@@ -118,6 +122,9 @@ def create_and_fit_pipeline(
     y: np.ndarray,
     x_val: np.ndarray,
     y_val: np.ndarray,
+    model_save_path,
+    dataset=None,
+    data_collator=None,
     in_scaler: Optional[Union[BaseEstimator, TransformerMixin]] = None,
     in_selector: Optional[Union[BaseEstimator, TransformerMixin]] = None,
 ) -> Tuple:
@@ -164,17 +171,24 @@ def create_and_fit_pipeline(
             params["nn_params"]["input_shape"] = new_input_shape
         steps.append(("feature_selection", in_selector))
 
-    # add estimator
-    torch_stimator = NNTorch(**params)
-    torch_stimator.fit(x_train, y, **{"validation_data": (x_val_transformed, y_val)})
+    # Check if dataset and model path are provided in params
+    if dataset is not None and model_save_path is not None:
+        torch_stimator = NNTorch(**params)
+        torch_stimator.fit(X=None, y=None, **{"dataset": dataset, "data_collator": data_collator, "model_path": model_save_path})
+    else:
+        # add estimator
+        torch_stimator = NNTorch(**params)
+        torch_stimator.fit(x_train, y, **{"validation_data": (x_val_transformed, y_val)})
 
     steps.append(("estimator", torch_stimator))
 
     pipeline_torch = Pipeline(steps=steps)
     # pipeline_torch.predict(x_val)
-
-    predictions = pipeline_torch.predict(x_val)
-    val_acc = calc_loss_acc_val(predictions, y_val)
+    if x_val is not None and y_val is not None:
+        predictions = pipeline_torch.predict(x_val)
+        val_acc = calc_loss_acc_val(predictions, y_val)
+    else:
+        val_acc = -1
     return pipeline_torch, val_acc
 
 
@@ -185,8 +199,11 @@ def process_params_torch(
     x_val: np.ndarray,
     y_val: np.ndarray,
     model_save_path: str,
+    in_mlflow_experiment_id: str = "name",
     in_mlflow_experiment_name: str = "name",
     is_fold: bool = False,
+    dataset = None,
+    data_collator = None,
     val_all_folds: float or None = None,
     in_scaler: Optional[Union[BaseEstimator, TransformerMixin]] = None,
     in_selector: Optional[Union[BaseEstimator, TransformerMixin]] = None,
@@ -221,7 +238,7 @@ def process_params_torch(
     params = params.copy()
 
     pipeline_torch, val_accuracy = create_and_fit_pipeline(
-        params, x_train, y, x_val, y_val, in_scaler, in_selector
+        params, x_train, y, x_val, y_val, model_save_path, dataset, data_collator, in_scaler, in_selector
     )
     # If it is a fold from fold validation then do not save the model to MLflow
     if is_fold:
@@ -232,19 +249,33 @@ def process_params_torch(
         if val_all_folds is not None:
             val_accuracy = val_all_folds
 
-        # model_name = 'model_' + '_'.join([f"{k}_{v}" for k, v in params.items()])
-        # pipeline_torch.named_steps['NN'].save(model_save_path, model_name)
+    # model_name = 'model_' + '_'.join([f"{k}_{v}" for k, v in params.items()])
+    # pipeline_torch.named_steps['NN'].save(model_save_path, model_name)
 
-        with mlflow.start_run(experiment_id=in_mlflow_experiment_name) as run:
-            print("Run ID:", run.info.run_id)
-            mlflow.log_params(flatten_dict(params))
-            mlflow.log_metric("val_accuracy", val_accuracy)
-            mlflow.sklearn.log_model(pipeline_torch, "pipeline")
-            # mlflow.pytorch.log_model(pipeline_torch.named_steps['NN'].nn_model, "models")
-            for k, v in params.items():
-                mlflow.log_param(k, v)
+    mlflow_experiment_name = in_mlflow_experiment_name
 
-        return params, val_accuracy, run.info.run_id
+    mlflow.set_tracking_uri("http://localhost:8000")
+    # Ensure environment variables are set for MinIO
+    load_dotenv(MLFLOW_ENV_PATH)
+    # os.environ["MLFLOW_S3_ENDPOINT_URL"] = "http://127.0.0.1:9000"
+    # os.environ["AWS_ACCESS_KEY_ID"] = "mlflow_user"
+    # os.environ["AWS_SECRET_ACCESS_KEY"] = "H03042020P16082022"
+
+    # mlflow.set_tracking_uri("http://public_ip_where_ml_flow_is_running:8000") <- public ip of VM
+    # do not forget to do: export PATH=$PATH:/home/ubuntu/.local/bin in VM
+
+    # mlflow.set_tracking_uri('http://host.docker.internal:8000')
+    mlflow_experiment_id = get_or_create_experiment(mlflow_experiment_name)
+    with mlflow.start_run(experiment_id=mlflow_experiment_id) as run:
+        print("Run ID:", run.info.run_id)
+        mlflow.log_params(flatten_dict(params))
+        mlflow.log_metric("val_accuracy", val_accuracy)
+        mlflow.sklearn.log_model(pipeline_torch, "pipeline")
+        # mlflow.pytorch.log_model(pipeline_torch.named_steps['NN'].nn_model, "models")
+        for k, v in params.items():
+            mlflow.log_param(k, v)
+
+    return params, val_accuracy, run.info.run_id
 
 
 def kfold_training_with_process_params_torch(
@@ -254,6 +285,7 @@ def kfold_training_with_process_params_torch(
     train_loader: Optional[DataLoader] = None,
     k_folds: int = 5,
     model_save_path: str = "models",
+    in_mlflow_experiment_id: str = "name",
     in_mlflow_experiment_name: str = "name",
     in_scaler: Optional[Union[BaseEstimator, TransformerMixin]] = None,
     in_selector: Optional[Union[BaseEstimator, TransformerMixin]] = None,
@@ -267,8 +299,10 @@ def kfold_training_with_process_params_torch(
     :param train_loader: Dataset for training.
     :param k_folds: Number of folds to use for the cross-validation, defaults to 5
     :param model_save_path: str, The path where the trained model should be saved.
-    :param in_mlflow_experiment_name: str, optional, The name of the MLflow experiment where results
-     are logged.
+    :param in_mlflow_experiment_id: id of the MLFlow experiment to log the optimization
+                                      results.
+    :param in_mlflow_experiment_name: Name of the MLFlow experiment to log the optimization
+                                      results.
     :param in_scaler: Scaler object to be used for feature scaling.
     :param in_selector: Feature selector to be used for feature selection.
 
@@ -295,6 +329,7 @@ def kfold_training_with_process_params_torch(
             x_val_fold,
             y_val_fold,
             model_save_path,
+            in_mlflow_experiment_id,
             in_mlflow_experiment_name,
             is_fold=True,
             val_all_folds=None,
@@ -336,14 +371,14 @@ def get_best_run_from_hyperoptim(
 
     :param results: parameters, validation accuracy, and run ID for one run of the model
 
-    :return: best_params: best parameters from hyperparameter optimization
+    :return: best_params: the best parameters from hyperparameter optimization
              best_val_accuracy: highest validation accuracy achieved during hyperparameter
              optimization
              best_run_id: ID of the best run
     """
     # Retrieve the best model run
     best_params = {}
-    best_val_accuracy = 0
+    best_val_accuracy = -10
     best_run_id = None
     for params, val_accuracy, run_id in results:
         if best_val_accuracy is None or val_accuracy > best_val_accuracy:

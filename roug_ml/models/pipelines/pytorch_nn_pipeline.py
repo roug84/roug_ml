@@ -4,19 +4,27 @@ log = logging.getLogger(__name__)  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 
+from beartype.typing import Optional, Tuple
 import torch
+torch.cuda.empty_cache()  # Clear memory cache if needed
+from copy import deepcopy
 
 torch.autograd.set_detect_anomaly(True)
+from transformers import Trainer
+import gc
+gc.collect()  # Explicit garbage collection
 
 import torch.optim as optim
 import torchvision
 from torch.utils.data import TensorDataset, DataLoader
+from datasets import Dataset
 
 import json
 from sklearn.metrics import accuracy_score
 import os
 import numpy as np
 import random
+from transformers import PreTrainedTokenizer
 
 from roug_ml.utl.evaluation.eval_utl import calc_loss_acc
 from roug_ml.models.nn_models import (
@@ -27,6 +35,20 @@ from roug_ml.models.nn_models import (
     FlexibleCNN2DTorchPower,
     MyTorchModel,
 )
+
+from transformers import (
+    GPT2LMHeadModel,
+    GPT2Tokenizer,
+    GPT2Config,
+    Trainer,
+    TrainingArguments,
+    get_linear_schedule_with_warmup,
+    # AdamW,
+    DataCollatorForLanguageModeling,
+)
+
+from torch.optim import AdamW
+
 
 from roug_ml.utl.set_seed import set_seed
 
@@ -57,6 +79,13 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
 
+class CustomTrainer(Trainer):
+    def train(self, resume_from_checkpoint=None):
+        # Override to add custom behavior or to handle training differently
+        super().train(resume_from_checkpoint=resume_from_checkpoint)
+        # Additional custom actions post training
+
+
 class NNTorch:
     """
     Model to wrap around PyTorch neural networks.
@@ -71,6 +100,7 @@ class NNTorch:
         learning_rate: float = 0.001,
         cost_function: torch.nn.Module = torch.nn.MSELoss(),
         metrics: list = ["accuracy"],
+        tokenizer_name: str = 'gpt2',
         verbose: bool = True,
     ):
         """
@@ -82,19 +112,22 @@ class NNTorch:
         :param learning_rate: Learning rate for the optimizer.
         :param cost_function: Loss function for optimization.
         :param metrics: List of evaluation metrics.
+        :param tokenizer_name: The pretrained tokenizer model name.
         :param verbose: Whether to print training progress.
         """
         self.val_accuracies = None
         set_seed(42)
         self.nn_params = nn_params
         self.nn_key = nn_key
-        self.nn_model = self.create_model()
         self.n_epochs = n_epochs
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.cost_function = cost_function
         self.verbose = verbose
         self.metrics = metrics
+        self.tokenizer = GPT2Tokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.nn_model = self.create_model()
 
     def create_model(self):
         """
@@ -157,6 +190,20 @@ class NNTorch:
 
             return alexnet
 
+        elif self.nn_key == "GPt2Net":
+            # Load pre-trained GPT-2 model and tokenizer
+            # model_name = "gpt2"
+            model_name = "gpt2"
+            dropout = self.nn_params["dropout"]
+
+            config = GPT2Config.from_pretrained(
+                model_name, embd_pdrop=dropout, attn_pdrop=dropout
+            )
+            model = GPT2LMHeadModel.from_pretrained(model_name, config=config)
+
+            # Assuming training is handled separately as in your provided GPT-2 code
+            return model
+
         elif self.nn_key == "FlexibleCNN2DTorchPower":
 
             return FlexibleCNN2DTorchPower(
@@ -176,22 +223,84 @@ class NNTorch:
             raise ValueError(f"Unsupported nn_key: {self.nn_key}")
 
     def fit(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        validation_data: tuple = None,  # dataloader=None, validation_dataloader=None,
-        continue_training: bool = True,
-    ):
+            self,
+            X: np.ndarray,
+            y: np.ndarray,
+            validation_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+            continue_training: bool = True,
+            dataset: Optional[Dataset] = None,
+            data_collator: Optional[PreTrainedTokenizer] = None,
+            model_path: Optional[str] = None
+    ) -> 'PyTorchNNPipeline':
         """
-        Train the neural network.
-        :param X: Training input data.
-        :param y: Target values.
-        :param validation_data: Validation data as a tuple of (X_val, y_val).
-        :param continue_training: Whether to continue training from the current state.
-        :return: Returns the instance itself
+        Trains the neural network using the specified dataset or input arrays and targets.
+
+        :param X: np.ndarray - Training input data, expected shape (n_samples, n_features).
+        :param y: np.ndarray - Target values, expected shape (n_samples,) for regression or
+                  (n_samples, n_classes) for classification.
+        :param validation_data: Optional[Tuple[np.ndarray, np.ndarray]] - A tuple containing
+                                validation data and its corresponding targets (X_val, y_val).
+        :param continue_training: bool - Flag to determine whether to continue training from the
+                                       last checkpoint or restart training.
+        :param dataset: Optional[Dataset] - The dataset object from the Hugging Face `datasets`
+                                             library, required for training models like GPT-2.
+        :param data_collator: Optional[PreTrainedTokenizer] - The data collator to format the
+                               data correctly for training, particularly necessary for
+                               tokenization and batching of textual data when training models like GPT-2.
+        :param model_path: Optional[str] - The file path where the trained model should be saved.
+                                           It is essential for scenarios where the model needs to
+                                           be saved incrementally or post-training.
+
+        :return: Returns the instance itself, allowing for chaining or direct access to modified attributes.
         """
+
         if self.verbose:
             print(self.nn_model)
+
+        if self.nn_key == "GPt2Net":
+            if dataset is None or model_path is None:
+                raise ValueError(
+                    "Dataset and model_path are required for GPT-2 training."
+                )
+            # Define optimizer and scheduler
+            optimizer = AdamW(self.nn_model.parameters(), lr=self.learning_rate)
+
+            num_train_epochs = self.n_epochs
+            num_training_steps = num_train_epochs * len(dataset)
+            scheduler = get_linear_schedule_with_warmup(
+                optimizer, num_warmup_steps=0, num_training_steps=num_training_steps
+            )
+
+            # Unfreeze the last layer
+            for parameter in self.nn_model.transformer.h[-1].parameters():
+                parameter.requires_grad = True
+
+            # Training arguments
+            training_args = TrainingArguments(
+                output_dir=model_path,
+                overwrite_output_dir=True,
+                num_train_epochs=num_train_epochs,
+                per_device_train_batch_size=4,
+                save_steps=10_000,
+                save_total_limit=2,
+            )
+
+            # Initialize Trainer
+            trainer = Trainer(
+                model=self.nn_model,
+                args=training_args,
+                data_collator=data_collator,
+                train_dataset=dataset,
+                optimizers=(optimizer, scheduler),
+            )
+            # Start fine-tuning
+            trainer.train()
+
+            # Save the trained model and tokenizer
+            self.nn_model.save_pretrained(model_path)
+            self.tokenizer.save_pretrained(model_path)
+
+            return self
 
         if not continue_training:
             self.nn_model = self.create_model()
@@ -439,3 +548,32 @@ class NNTorch:
                 probabilities, 1
             )  # Get the class with the highest probability
         return predicted_classes.numpy()  # Convert tensor to numpy array
+
+    def generate_text(self, input_ids: np.ndarray, max_length: int = 50) -> str:
+        """
+        Generate text using the GPT-2 model or any other suitable generative model.
+
+        :param input_ids: Input token IDs for starting the text generation.
+        :param max_length: Maximum length of the generated text sequence.
+        :return: Generated text as a string.
+        """
+        self.nn_model.eval()  # Set the model to evaluation mode
+        device = next(self.nn_model.parameters()).device  # Get the model's device
+
+        # Convert input IDs to a tensor and send to the appropriate device
+        input_ids = torch.tensor(input_ids, dtype=torch.long).to(device)
+        generated = input_ids
+
+        with torch.no_grad():
+            for _ in range(max_length):
+                outputs = self.nn_model(input_ids)
+                predictions = outputs[:, -1, :]  # get the last token logits
+                predicted_index = torch.argmax(predictions, axis=-1).unsqueeze(0)  # get the most likely next token ID
+                generated = torch.cat((generated, predicted_index), dim=1)  # append to the sequence
+                input_ids = predicted_index
+
+                if predicted_index.item() == self.tokenizer.eos_token_id:
+                    break  # stop generating if the end of sequence token is generated
+
+        generated_text = self.tokenizer.decode(generated.squeeze().tolist())  # decode the token IDs to text
+        return generated_text

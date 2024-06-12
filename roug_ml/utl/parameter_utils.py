@@ -88,6 +88,9 @@ def generate_param_grid_with_different_size_layers(nn_key: List[str],
                                                    layer_sizes: List[List[int]],
                                                    activations: List[List[str]],
                                                    cnn_filters: List[int],
+                                                   dropout: List[float] = None,
+                                                   attention_dropout: List[float] = None,
+                                                   tokenizer_name: List[str] = None
                                                    ) -> List[Dict]:
     """
     Function to generate the parameter grid for a neural network model.
@@ -144,6 +147,13 @@ def generate_param_grid_with_different_size_layers(nn_key: List[str],
                     #                     'activations': activation,
                     #                     'filters': filter_num}
                     #         param_grid_inner.append(tmp_dict)
+                    elif key == "GPt2Net":
+                        for tokenizer_name_i in tokenizer_name:
+                            # TODO: add for loop for dropout and attention_dropout
+                            tmp_dict = {'nn_key': key, 'in_nn': layers, 'activations': activation,
+                                        'dropout': dropout, 'attention_dropout': attention_dropout,
+                                        'tokenizer_name': tokenizer_name_i}
+                            param_grid_inner.append(tmp_dict)
                     else:
                         tmp_dict = {'nn_key': key, 'in_nn': layers, 'activations': activation}
                         param_grid_inner.append(tmp_dict)
@@ -175,6 +185,10 @@ def combine_parameters(inner_params: List, outer_params: ParameterGrid) -> List[
     {'x': 7, 'y': 8, 'a': 1, 'b': 2},
     {'x': 7, 'y': 8, 'a': 3, 'b': 4}]
     """
+    if inner_params is None:
+        inner_params = [{}]
+    if outer_params is None:
+        outer_params = [{}]
     all_params = []
     for outer_param in outer_params:
         for inner_param in inner_params:

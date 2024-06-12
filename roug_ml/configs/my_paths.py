@@ -17,3 +17,6 @@ RESULTS_PATH = os.path.abspath(os.path.join(root_path, "../../../../results"))
 
 # Path to mlflow folder
 MLFLOW_BACK_PATH = os.path.join(data_path, "artifacts")
+
+# mlflow.env path
+MLFLOW_ENV_PATH = os.path.join(root_path, "mlflow.env")
