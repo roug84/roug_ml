@@ -17,8 +17,11 @@ Usage:
 This script can be imported and used in other Python scripts that require
 Cassandra database operations.
 """
+from datetime import datetime
 
 from cassandra.cluster import Cluster
+from cassandra.util import Date
+
 
 def get_cassandra_session(keyspace: str = None) -> Cluster.connect:
     """
@@ -59,3 +62,15 @@ def create_table(session: Cluster.connect, table_name: str, schema: str) -> None
     :param schema: Schema definition for the table (e.g., "id UUID PRIMARY KEY, name TEXT")
     """
     session.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({schema})")
+
+
+def convert_cassandra_date(cassandra_date: Date) -> datetime.date:
+    """
+    Convert Cassandra Date object to Python date object.
+
+    :param cassandra_date: Cassandra Date object to convert
+    :return: Converted Python date object
+    """
+    if isinstance(cassandra_date, Date):
+        return cassandra_date.date()
+    return cassandra_date
