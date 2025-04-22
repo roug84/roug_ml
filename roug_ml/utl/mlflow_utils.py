@@ -4,7 +4,15 @@ import mlflow
 from datetime import datetime
 
 import views.views_utl
-
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import (
+    confusion_matrix, classification_report,
+    roc_curve, auc, precision_recall_curve, average_precision_score
+)
+import mlflow
 
 def get_best_run(experiment_name: str, metric_key: str) -> Tuple[str, dict]:
     """
@@ -378,3 +386,447 @@ def promote_single_model_to_production(
     except Exception as e:
         print(f"Error promoting {model_name} to Production: {str(e)}")
         return None
+
+# ------------------------------------------- VIZU
+# ------------------------------------------- VIZU
+# ------------------------------------------- VIZU
+# ------------------------------------------- VIZU
+# ------------------------------------------- VIZU
+# ------------------------------------------- VIZU
+# ------------------------------------------- VIZU
+
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import (
+    confusion_matrix, classification_report,
+    roc_curve, auc, precision_recall_curve, average_precision_score
+)
+import mlflow
+
+
+def ensure_numpy_array(y):
+    """Convert input to numpy array and ensure it has the right format"""
+    if isinstance(y, np.ndarray):
+        return y
+    return np.array(y)
+
+
+def create_and_log_roc_curve(y_true, y_score, output_dir, run_id=None):
+    """
+    Create ROC curve and log it to MLflow
+
+    Parameters:
+    -----------
+    y_true : array-like
+        True binary labels
+    y_score : array-like
+        Target scores (probability estimates of the positive class)
+    output_dir : str
+        Directory to save the ROC curve image
+    run_id : str, optional
+        MLflow run ID to log to
+
+    Returns:
+    --------
+    float
+        ROC AUC score
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Ensure inputs are in the right format
+    y_true = ensure_numpy_array(y_true)
+    y_score = ensure_numpy_array(y_score)
+
+    # Convert multilabel to binary if needed
+    if len(y_true.shape) > 1 and y_true.shape[1] > 1:
+        y_true = np.argmax(y_true, axis=1)
+
+    # Calculate ROC curve and AUC
+    fpr, tpr, _ = roc_curve(y_true, y_score)
+    roc_auc = auc(fpr, tpr)
+
+    # Plot ROC curve
+    plt.figure(figsize=(8, 8))
+    plt.plot(fpr, tpr, color='blue', lw=2, label=f'ROC curve (AUC = {roc_auc:.3f})')
+    plt.plot([0, 1], [0, 1], color='gray', linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver Operating Characteristic (ROC)')
+    plt.legend(loc='lower right')
+    plt.grid(True, linestyle='--', alpha=0.5)
+
+    # Save the plot
+    roc_path = os.path.join(output_dir, "roc_curve.png")
+    plt.savefig(roc_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Log to MLflow - don't start a new run, just log to the active run
+    try:
+        mlflow.log_metric("roc_auc", roc_auc)
+        mlflow.log_artifact(roc_path)
+    except Exception as e:
+        print(f"Warning: Failed to log ROC curve to MLflow: {e}")
+
+    return roc_auc
+
+
+def create_and_log_pr_curve(y_true, y_score, output_dir, run_id=None):
+    """
+    Create precision-recall curve and log it to MLflow
+
+    Parameters:
+    -----------
+    y_true : array-like
+        True binary labels
+    y_score : array-like
+        Target scores (probability estimates of the positive class)
+    output_dir : str
+        Directory to save the precision-recall curve image
+    run_id : str, optional
+        MLflow run ID to log to
+
+    Returns:
+    --------
+    float
+        Average precision score
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Ensure inputs are in the right format
+    y_true = ensure_numpy_array(y_true)
+    y_score = ensure_numpy_array(y_score)
+
+    # Convert multilabel to binary if needed
+    if len(y_true.shape) > 1 and y_true.shape[1] > 1:
+        y_true = np.argmax(y_true, axis=1)
+
+    # Calculate precision-recall curve and average precision
+    precision, recall, _ = precision_recall_curve(y_true, y_score)
+    avg_precision = average_precision_score(y_true, y_score)
+
+    # Plot precision-recall curve
+    plt.figure(figsize=(8, 8))
+    plt.plot(recall, precision, color='darkgreen', lw=2,
+             label=f'Precision-Recall curve (AP = {avg_precision:.3f})')
+    plt.xlabel('Recall')
+    plt.ylabel('Precision')
+    plt.title('Precision-Recall Curve')
+    plt.legend(loc='best')
+    plt.grid(True, linestyle='--', alpha=0.5)
+
+    # Save the plot
+    pr_path = os.path.join(output_dir, "precision_recall_curve.png")
+    plt.savefig(pr_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Log to MLflow - don't start a new run, just log to the active run
+    try:
+        mlflow.log_metric("average_precision", avg_precision)
+        mlflow.log_artifact(pr_path)
+    except Exception as e:
+        print(f"Warning: Failed to log PR curve to MLflow: {e}")
+
+    return avg_precision
+
+
+def create_and_log_confusion_matrix(y_true, y_pred, output_dir, class_names=None, run_id=None):
+    """
+    Create confusion matrix and log it to MLflow
+
+    Parameters:
+    -----------
+    y_true : array-like
+        True labels
+    y_pred : array-like
+        Predicted labels
+    output_dir : str
+        Directory to save the confusion matrix image
+    class_names : list, optional
+        List of class names for the labels
+    run_id : str, optional
+        MLflow run ID to log to
+
+    Returns:
+    --------
+    numpy.ndarray
+        Confusion matrix
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Ensure inputs are in the right format
+    y_true = ensure_numpy_array(y_true)
+    y_pred = ensure_numpy_array(y_pred)
+
+    # Convert multilabel to multiclass if needed
+    if len(y_true.shape) > 1 and y_true.shape[1] > 1:
+        y_true = np.argmax(y_true, axis=1)
+    if len(y_pred.shape) > 1 and y_pred.shape[1] > 1:
+        y_pred = np.argmax(y_pred, axis=1)
+
+    # Calculate confusion matrix
+    cm = confusion_matrix(y_true, y_pred)
+
+    # Plot confusion matrix
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=True)
+
+    # Add class labels if provided or auto-generate for small number of classes
+    n_classes = len(np.unique(np.concatenate([y_true, y_pred])))
+    if class_names is None and n_classes <= 10:
+        class_names = [f"Class {i}" for i in range(n_classes)]
+
+    if class_names is not None:
+        tick_marks = np.arange(len(class_names))
+        plt.xticks(tick_marks + 0.5, class_names, rotation=45, ha="right")
+        plt.yticks(tick_marks + 0.5, class_names, rotation=0)
+
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    plt.title('Confusion Matrix')
+
+    # Save the plot
+    cm_path = os.path.join(output_dir, "confusion_matrix.png")
+    plt.tight_layout()
+    plt.savefig(cm_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Log to MLflow - don't start a new run, just log to the active run
+    try:
+        mlflow.log_artifact(cm_path)
+    except Exception as e:
+        print(f"Warning: Failed to log confusion matrix to MLflow: {e}")
+
+    return cm
+
+
+def create_and_log_classification_report(y_true, y_pred, output_dir, run_id=None):
+    """
+    Create classification report and log it to MLflow
+
+    Parameters:
+    -----------
+    y_true : array-like
+        True labels
+    y_pred : array-like
+        Predicted labels
+    output_dir : str
+        Directory to save the classification report
+    run_id : str, optional
+        MLflow run ID to log to
+
+    Returns:
+    --------
+    dict
+        Classification report as a dictionary
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Ensure inputs are in the right format
+    y_true = ensure_numpy_array(y_true)
+    y_pred = ensure_numpy_array(y_pred)
+
+    # Convert multilabel to multiclass if needed
+    if len(y_true.shape) > 1 and y_true.shape[1] > 1:
+        y_true = np.argmax(y_true, axis=1)
+    if len(y_pred.shape) > 1 and y_pred.shape[1] > 1:
+        y_pred = np.argmax(y_pred, axis=1)
+
+    # Generate classification report
+    report_dict = classification_report(y_true, y_pred, output_dict=True)
+    report_str = classification_report(y_true, y_pred)
+
+    # Save report as text file
+    report_path = os.path.join(output_dir, "classification_report.txt")
+    with open(report_path, "w") as f:
+        f.write(report_str)
+
+    # Create a more visually appealing report as an image
+    plt.figure(figsize=(12, 8))
+
+    # Extract metrics for visualization
+    classes = []
+    precision = []
+    recall = []
+    f1_score = []
+    support = []
+
+    for class_name, metrics in report_dict.items():
+        if isinstance(metrics, dict) and 'precision' in metrics:
+            classes.append(class_name)
+            precision.append(metrics['precision'])
+            recall.append(metrics['recall'])
+            f1_score.append(metrics['f1-score'])
+            support.append(metrics['support'])
+
+    # Plot metrics if we have classes to show
+    if classes:
+        x = np.arange(len(classes))
+        width = 0.2
+
+        fig, ax = plt.subplots(figsize=(12, 8))
+        rects1 = ax.bar(x - width, precision, width, label='Precision')
+        rects2 = ax.bar(x, recall, width, label='Recall')
+        rects3 = ax.bar(x + width, f1_score, width, label='F1-score')
+
+        # Add some text for labels, title and custom x-axis tick labels
+        ax.set_ylabel('Scores')
+        ax.set_title('Classification Report')
+        ax.set_xticks(x)
+        ax.set_xticklabels(classes, rotation=45, ha='right')
+        ax.legend()
+
+        # Add value labels to the bars
+        def autolabel(rects):
+            for rect in rects:
+                height = rect.get_height()
+                ax.annotate(f'{height:.2f}',
+                            xy=(rect.get_x() + rect.get_width() / 2, height),
+                            xytext=(0, 3),  # 3 points vertical offset
+                            textcoords="offset points",
+                            ha='center', va='bottom')
+
+        autolabel(rects1)
+        autolabel(rects2)
+        autolabel(rects3)
+
+        fig.tight_layout()
+
+        # Save visualization
+        report_viz_path = os.path.join(output_dir, "classification_report_viz.png")
+        plt.savefig(report_viz_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+    # Log to MLflow - don't start a new run, just log to the active run
+    try:
+        mlflow.log_artifact(report_path)
+        if classes:  # Only log the visualization if we created it
+            mlflow.log_artifact(report_viz_path)
+
+        # Log metrics from classification report
+        for class_name, metrics in report_dict.items():
+            if isinstance(metrics, dict):
+                for metric_name, value in metrics.items():
+                    if isinstance(value, (int, float)):
+                        mlflow.log_metric(f"{class_name}_{metric_name}", value)
+    except Exception as e:
+        print(f"Warning: Failed to log classification report to MLflow: {e}")
+
+    return report_dict
+
+
+def create_and_log_training_history(history, output_dir, run_id=None):
+    """
+    Create training history plots and log them to MLflow
+
+    Parameters:
+    -----------
+    history : dict
+        Dictionary containing training metrics (train_loss, train_acc, val_loss, val_acc)
+    output_dir : str
+        Directory to save the training history plots
+    run_id : str, optional
+        MLflow run ID to log to
+
+    Returns:
+    --------
+    list
+        List of paths to the created plots
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    plot_paths = []
+
+    # Check if we have any history to plot
+    if not history or not any(len(v) > 0 for v in history.values()):
+        return plot_paths
+
+    # Determine how many epochs we have
+    max_epochs = max(len(v) for v in history.values())
+    epochs = list(range(1, max_epochs + 1))
+
+    # Create loss plot
+    if 'train_loss' in history and len(history['train_loss']) > 0:
+        plt.figure(figsize=(10, 6))
+        plt.plot(epochs[:len(history['train_loss'])], history['train_loss'], 'b-o', label='Training Loss')
+
+        if 'val_loss' in history and len(history['val_loss']) > 0:
+            plt.plot(epochs[:len(history['val_loss'])], history['val_loss'], 'r-s', label='Validation Loss')
+
+        plt.title('Training and Validation Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.legend()
+
+        loss_path = os.path.join(output_dir, "loss_history.png")
+        plt.savefig(loss_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        plot_paths.append(loss_path)
+
+    # Create accuracy plot
+    if 'train_acc' in history and len(history['train_acc']) > 0:
+        plt.figure(figsize=(10, 6))
+        plt.plot(epochs[:len(history['train_acc'])], history['train_acc'], 'g-o', label='Training Accuracy')
+
+        if 'val_acc' in history and len(history['val_acc']) > 0:
+            plt.plot(epochs[:len(history['val_acc'])], history['val_acc'], 'm-s', label='Validation Accuracy')
+
+        plt.title('Training and Validation Accuracy')
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy')
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.legend()
+
+        acc_path = os.path.join(output_dir, "accuracy_history.png")
+        plt.savefig(acc_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        plot_paths.append(acc_path)
+
+    # Create combined plot
+    plt.figure(figsize=(12, 10))
+
+    plt.subplot(2, 1, 1)
+    if 'train_loss' in history and len(history['train_loss']) > 0:
+        plt.plot(epochs[:len(history['train_loss'])], history['train_loss'], 'b-o', label='Training Loss')
+    if 'val_loss' in history and len(history['val_loss']) > 0:
+        plt.plot(epochs[:len(history['val_loss'])], history['val_loss'], 'r-s', label='Validation Loss')
+    plt.title('Training and Validation Loss')
+    plt.ylabel('Loss')
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend()
+
+    plt.subplot(2, 1, 2)
+    if 'train_acc' in history and len(history['train_acc']) > 0:
+        plt.plot(epochs[:len(history['train_acc'])], history['train_acc'], 'g-o', label='Training Accuracy')
+    if 'val_acc' in history and len(history['val_acc']) > 0:
+        plt.plot(epochs[:len(history['val_acc'])], history['val_acc'], 'm-s', label='Validation Accuracy')
+    plt.title('Training and Validation Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend()
+
+    plt.tight_layout()
+
+    combined_path = os.path.join(output_dir, "training_history.png")
+    plt.savefig(combined_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    plot_paths.append(combined_path)
+
+    # Log to MLflow - don't start a new run, just log to the active run
+    try:
+        # Log artifacts
+        for path in plot_paths:
+            mlflow.log_artifact(path)
+
+        # Log final epoch metrics
+        for metric_name, values in history.items():
+            if values:
+                mlflow.log_metric(f"final_{metric_name}", values[-1])
+    except Exception as e:
+        print(f"Warning: Failed to log training history to MLflow: {e}")
+
+    return plot_paths

@@ -128,6 +128,13 @@ class NNTorch:
         self.tokenizer = GPT2Tokenizer.from_pretrained(tokenizer_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.nn_model = self.create_model()
+        # Add history dictionary to track training metrics
+        self.history = {
+            'train_loss': [],
+            'train_acc': [],
+            'val_loss': [],
+            'val_acc': []
+        }
 
     def create_model(self):
         """
@@ -391,12 +398,17 @@ class NNTorch:
             train_loss = train_loss / len(dataloader)
             train_acc = train_correct / num_train_samples
 
+            self.history['train_loss'].append(train_loss)
+            self.history['train_acc'].append(train_acc)
+
             # log.info("Loss computation")
             # Validation
             if validation_data is not None:
                 val_loss, val_acc = self.validate_model(
                     self.nn_model, val_dataloader, self.cost_function, device
                 )
+                self.history['val_loss'].append(val_loss)
+                self.history['val_acc'].append(val_acc)
                 self.val_accuracies.append(val_acc)
 
             if self.verbose:
@@ -547,7 +559,7 @@ class NNTorch:
             _, predicted_classes = torch.max(
                 probabilities, 1
             )  # Get the class with the highest probability
-        return predicted_classes.numpy()  # Convert tensor to numpy array
+        return predicted_classes.cpu().numpy()  # Convert tensor to numpy array
 
     def generate_text(self, input_ids: np.ndarray, max_length: int = 50) -> str:
         """
@@ -577,3 +589,39 @@ class NNTorch:
 
         generated_text = self.tokenizer.decode(generated.squeeze().tolist())  # decode the token IDs to text
         return generated_text
+
+    # Add this method to your NNTorch class in roug_ml/models/pipelines/pytorch_nn_pipeline.py
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """
+        Generate probability estimates for the input samples.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            The input samples.
+
+        Returns
+        -------
+        T : array-like of shape (n_samples, n_classes)
+            The class probabilities of the input samples.
+        """
+        self.nn_model.eval()  # Set the model to evaluation mode
+
+        # Get the device that the model is on
+        device = next(self.nn_model.parameters()).device
+
+        # Convert input to tensor if needed
+        if not isinstance(X, torch.Tensor):
+            X = torch.tensor(X, dtype=torch.float32).to(device)
+
+        # Get predictions without calculating gradients
+        with torch.no_grad():
+            outputs = self.nn_model(X)
+
+            # Apply softmax to convert logits to probabilities
+            probabilities = torch.nn.functional.softmax(outputs, dim=1)
+
+            # Convert to numpy array
+            probabilities = probabilities.cpu().numpy()
+
+        return probabilities
