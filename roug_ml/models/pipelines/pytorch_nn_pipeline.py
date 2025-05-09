@@ -14,6 +14,8 @@ from transformers import Trainer
 import gc
 gc.collect()  # Explicit garbage collection
 
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 import torch.optim as optim
 import torchvision
 from torch.utils.data import TensorDataset, DataLoader
@@ -77,6 +79,7 @@ if torch.cuda.is_available():
 # Additional options for deterministic operations
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+from sklearn.metrics import mean_squared_error
 
 
 class CustomTrainer(Trainer):
@@ -93,6 +96,7 @@ class NNTorch:
 
     def __init__(
         self,
+        task_type: str = "classification",
         nn_key: str = "MLP",
         nn_params: dict = None,
         n_epochs: int = 10,
@@ -115,6 +119,7 @@ class NNTorch:
         :param tokenizer_name: The pretrained tokenizer model name.
         :param verbose: Whether to print training progress.
         """
+        self.task_type = task_type  # either "classification" or "regression"
         self.val_accuracies = None
         set_seed(42)
         self.nn_params = nn_params
@@ -260,6 +265,8 @@ class NNTorch:
 
         :return: Returns the instance itself, allowing for chaining or direct access to modified attributes.
         """
+        if self.task_type == "regression":
+            y = y.reshape(-1, 1)
 
         if self.verbose:
             print(self.nn_model)
@@ -330,6 +337,7 @@ class NNTorch:
             betas=(0.9, 0.999),
             amsgrad=False,
         )
+        scheduler = ReduceLROnPlateau(optimizer_choice, mode='min', factor=0.1, patience=5, verbose=True)
 
         log.info("Optimizer: done")
         X, y = torch.Tensor(X), torch.Tensor(y)
@@ -345,33 +353,32 @@ class NNTorch:
                 torch.Tensor(validation_data[0]),
                 torch.Tensor(validation_data[1]),
             )
-            val_dataset = TensorDataset(x_val, y_val)
-            val_dataloader = DataLoader(
-                val_dataset, batch_size=self.batch_size, shuffle=True, num_workers=0
-            )  # <--- HERE
-            # Add a new list to store validation accuracies
+            if self.task_type == "regression" and y_val.ndim == 1:
+                y_val = y_val.unsqueeze(1)
+            val_dataloader = DataLoader(TensorDataset(x_val, y_val), batch_size=self.batch_size, shuffle=True,
+                                        num_workers=0)
             self.val_accuracies = []
 
         for epoch in range(self.n_epochs):
             # log.info("Start training")
             train_loss = 0.0
-            train_correct = 0
-            num_train_samples = 0
+            metric_sum = 0.0
+            num_samples = 0
 
-            if epoch == 50:
-                for param_group in optimizer_choice.param_groups:
-                    param_group["lr"] = 0.00001
-                    print(param_group["lr"])
-
-            if epoch == 60:
-                for param_group in optimizer_choice.param_groups:
-                    param_group["lr"] = 0.001
-                    print(param_group["lr"])
-
-            if epoch == 70:
-                for param_group in optimizer_choice.param_groups:
-                    param_group["lr"] = 0.0001
-                    print(param_group["lr"])
+            # if epoch == 50:
+            #     for param_group in optimizer_choice.param_groups:
+            #         param_group["lr"] = 0.00001
+            #         print(param_group["lr"])
+            #
+            # if epoch == 60:
+            #     for param_group in optimizer_choice.param_groups:
+            #         param_group["lr"] = 0.001
+            #         print(param_group["lr"])
+            #
+            # if epoch == 70:
+            #     for param_group in optimizer_choice.param_groups:
+            #         param_group["lr"] = 0.0001
+            #         print(param_group["lr"])
 
             # Training
             self.nn_model.train()
@@ -382,50 +389,42 @@ class NNTorch:
 
                 loss = self.cost_function(outputs, targets)
                 loss.backward()
-                del loss
-
                 optimizer_choice.step()
 
-                batch_loss, batch_acc = calc_loss_acc(
-                    outputs, targets, self.cost_function
-                )
-                train_loss = train_loss + batch_loss
-                train_correct = train_correct + batch_acc * targets.size(
-                    0
-                )  # un-normalize the accuracy
-                num_train_samples = num_train_samples + targets.size(0)
+                train_loss += loss.item() * targets.size(0)
+                if self.task_type == "classification":
+                    _, batch_acc = calc_loss_acc(outputs, targets, self.cost_function)
+                    metric_sum += batch_acc * targets.size(0)
+                else:
+                    rmse = mean_squared_error(targets.cpu().numpy(), outputs.detach().cpu().numpy(), squared=False)
+                    metric_sum += rmse * targets.size(0)
 
-            train_loss = train_loss / len(dataloader)
-            train_acc = train_correct / num_train_samples
+                num_samples += targets.size(0)
+
+            train_loss /= num_samples
+            train_metric = metric_sum / num_samples
 
             self.history['train_loss'].append(train_loss)
-            self.history['train_acc'].append(train_acc)
+            self.history['train_acc'].append(train_metric)
 
-            # log.info("Loss computation")
-            # Validation
             if validation_data is not None:
-                val_loss, val_acc = self.validate_model(
-                    self.nn_model, val_dataloader, self.cost_function, device
-                )
+                val_loss, val_metric = self.validate_model(self.nn_model, val_dataloader, self.cost_function, device)
                 self.history['val_loss'].append(val_loss)
-                self.history['val_acc'].append(val_acc)
-                self.val_accuracies.append(val_acc)
+                self.history['val_acc'].append(val_metric)
+                self.val_accuracies.append(val_metric)
+                scheduler.step(val_loss)
 
             if self.verbose:
-                print(
-                    f"Epoch {epoch + 1}/{self.n_epochs} Train Loss: "
-                    f"{train_loss:.4f} Train Acc: {train_acc:.4f}",
-                    end="",
-                )
-                if validation_data is not None:  # or validation_dataloader is not None:
-                    print(f" Val Loss: {val_loss:.4f} Val Acc: {val_acc:.4f}")
+                print(f"Epoch {epoch + 1}/{self.n_epochs} Train Loss: {train_loss:.4f} Train Acc: {train_metric:.4f}",
+                      end="")
+                if validation_data is not None:
+                    print(f" Val Loss: {val_loss:.4f} Val Acc: {val_metric:.4f}")
                 else:
                     print()
 
         return self
 
-    @staticmethod
-    def validate_model(nn_model, val_dataloader, cost_function, device) -> tuple:
+    def validate_model(self, nn_model, val_dataloader, cost_function, device) -> tuple:
         """
         Validate the neural network model.
 
@@ -436,22 +435,32 @@ class NNTorch:
 
         :return validation loss and accuracy.
         """
-        nn_model.eval()  # Set the model to evaluation mode
+        nn_model.eval()
         val_loss = 0.0
-        val_correct = 0
-        num_train_samples = 0
-        for inputs, targets in val_dataloader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = nn_model(inputs)
-            batch_loss, batch_acc = calc_loss_acc(outputs, targets, cost_function)
-            val_loss += batch_loss
-            val_correct += batch_acc * targets.size(0)  # un-normalize the accuracy
-            num_train_samples += targets.size(0)
+        metric_sum = 0.0
+        num_samples = 0
 
-        val_loss /= len(val_dataloader)
-        val_acc = val_correct / num_train_samples
+        with torch.no_grad():
+            for inputs, targets in val_dataloader:
+                inputs, targets = inputs.to(device), targets.to(device)
+                outputs = nn_model(inputs)
 
-        return val_loss, val_acc
+                batch_loss = cost_function(outputs, targets).item()
+                val_loss += batch_loss * targets.size(0)
+
+                if self.task_type == "classification":
+                    _, batch_acc = calc_loss_acc(outputs, targets, cost_function)
+                    metric_sum += batch_acc * targets.size(0)
+                else:
+                    rmse = mean_squared_error(targets.cpu().numpy(), outputs.detach().cpu().numpy(), squared=False)
+                    metric_sum += rmse * targets.size(0)
+
+                num_samples += targets.size(0)
+
+        val_loss /= num_samples
+        val_metric = metric_sum / num_samples
+
+        return val_loss, val_metric
 
     def score(self, X: np.ndarray, y: np.ndarray) -> float:
         """
@@ -547,19 +556,23 @@ class NNTorch:
 
         :param X: Input data.
 
-        :return: Prediction.
+        :return: Predictions.
         """
-        self.nn_model.eval()  # Set the model to evaluation mode
-        X = torch.Tensor(X)
-        with torch.no_grad():  # Do not calculate gradients to speed up computation
+        self.nn_model.eval()
+        device = next(self.nn_model.parameters()).device
+
+        # Convert to tensor and move to device
+        X = torch.tensor(X, dtype=torch.float32).to(device)
+
+        with torch.no_grad():
             outputs = self.nn_model(X)
-            probabilities = torch.nn.functional.softmax(
-                outputs, dim=1
-            )  # Apply softmax to get probabilities
-            _, predicted_classes = torch.max(
-                probabilities, 1
-            )  # Get the class with the highest probability
-        return predicted_classes.cpu().numpy()  # Convert tensor to numpy array
+            if self.task_type == "classification":
+                probabilities = torch.nn.functional.softmax(outputs, dim=1)
+                _, predicted_classes = torch.max(probabilities, 1)
+                return predicted_classes.cpu().numpy()
+
+            elif self.task_type == "regression":
+                return outputs.cpu().numpy().squeeze()  # squeeze to flatten shape (N, 1) -> (N,)
 
     def generate_text(self, input_ids: np.ndarray, max_length: int = 50) -> str:
         """

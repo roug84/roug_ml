@@ -2,8 +2,6 @@ from mlflow.tracking import MlflowClient
 from beartype.typing import Tuple, List, Optional
 import mlflow
 from datetime import datetime
-
-import views.views_utl
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,15 +12,15 @@ from sklearn.metrics import (
 )
 import mlflow
 
-def get_best_run(experiment_name: str, metric_key: str) -> Tuple[str, dict]:
+def get_best_run(experiment_name: str, metric_key: str, maximize: bool = True) -> Tuple[str, dict]:
     """
     Retrieves the best run and its parameters from a specified experiment.
 
-    :param experiment_name: Name of the experiment
-    :param metric_key: Key of the metric to use for determining the best run. The best run is
-     determined by ordering the runs by this metric in descending order and picking the first one.
+    :param experiment_name: Name of the experiment.
+    :param metric_key: Key of the metric to use for determining the best run.
+    :param maximize: If True, selects the run with the highest metric value; if False, selects the lowest.
     :return: A tuple containing the ID of the best run and the parameters of the best run.
-    :raises ValueError: If no such experiment exists.
+    :raises ValueError: If no such experiment exists or no runs are found.
     """
     client = MlflowClient()
 
@@ -31,19 +29,24 @@ def get_best_run(experiment_name: str, metric_key: str) -> Tuple[str, dict]:
     if not experiment:
         raise ValueError(f"No such experiment '{experiment_name}'")
 
-    # Search for the best run in the experiment
+    # Choose sorting direction
+    sort_order = "DESC" if maximize else "ASC"
+
+    # Search for runs in the experiment
     runs = client.search_runs(
-        [experiment.experiment_id], order_by=[f"metric.{metric_key} DESC"]
+        [experiment.experiment_id],
+        order_by=[f"metric.{metric_key} {sort_order}"]
     )
 
-    # Assuming the first run is the best one
+    if not runs:
+        raise ValueError(f"No runs found for experiment '{experiment_name}'")
+
     best_run = runs[0]
-    # retrieve the best run_id
     best_run_id = best_run.info.run_id
-    # retrieve the best parameters
     best_params = best_run.data.params
 
     return best_run_id, best_params
+
 
 
 def get_top_n_runs(

@@ -79,7 +79,24 @@ if torch.cuda.is_available():
 
 set_seed(42)
 
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, accuracy_score
+import numpy as np
+
+
+def calc_loss_acc_val_dynamic(predictions, targets, metric="accuracy"):
+    if metric == "accuracy":
+        return accuracy_score(targets, predictions)
+    elif metric == "rmse":
+        return np.sqrt(mean_squared_error(targets, predictions))
+    elif metric == "mae":
+        return mean_absolute_error(targets, predictions)
+    elif metric == "r2":
+        return r2_score(targets, predictions)
+    else:
+        raise ValueError(f"Unsupported metric: {metric}")
+
 def parallele_hyper_optim(
+    task_type: str,
     in_num_workers: int,
     x_train: np.ndarray,
     y: np.ndarray,
@@ -147,7 +164,7 @@ def parallele_hyper_optim(
         # )
         results = []
         for params_outer in param_grid_outer:
-            result = process_params_torch(
+            result = process_params_torch(task_type,
                 params_outer, x_train, y, x_val, y_val, model_save_path,
                 in_mlflow_experiment_id, in_mlflow_experiment_name, use_kfold, dataset, data_collator,
                 None, in_scaler, in_selector
@@ -161,6 +178,7 @@ def parallele_hyper_optim(
 
 
 def create_and_fit_pipeline(
+    task_type: str,
     params: Dict[str, Union[int, str, list]],
     x_train: np.ndarray,
     y: np.ndarray,
@@ -216,6 +234,8 @@ def create_and_fit_pipeline(
         steps.append(("feature_selection", in_selector))
 
     # Check if dataset and model path are provided in params
+    params["task_type"] = task_type
+
     if dataset is not None and model_save_path is not None:
         torch_stimator = NNTorch(**params)
         torch_stimator.fit(X=None, y=None, **{"dataset": dataset, "data_collator": data_collator, "model_path": model_save_path})
@@ -228,15 +248,20 @@ def create_and_fit_pipeline(
 
     pipeline_torch = Pipeline(steps=steps)
     # pipeline_torch.predict(x_val)
+    # if x_val is not None and y_val is not None:
+    #     predictions = pipeline_torch.predict(x_val)
+    #     val_acc = calc_loss_acc_val(predictions, y_val)
     if x_val is not None and y_val is not None:
-        predictions = pipeline_torch.predict(x_val)
-        val_acc = calc_loss_acc_val(predictions, y_val)
+        predictions = pipeline_torch.predict(x_val_transformed)
+        metric = params.get("metrics", "accuracy")
+        val_score = calc_loss_acc_val_dynamic(predictions, y_val, metric=metric)
     else:
-        val_acc = -1
-    return pipeline_torch, val_acc
+        val_score = -1
+    return pipeline_torch, val_score
 
 
 def process_params_torch(
+        task_type: str,
         params: Dict[str, Union[int, str, list]],
         x_train: np.ndarray,
         y: np.ndarray,
@@ -293,7 +318,7 @@ def process_params_torch(
     os.makedirs(model_save_path, exist_ok=True)
 
     # Create and train pipeline
-    pipeline_torch, val_accuracy = create_and_fit_pipeline(
+    pipeline_torch, val_accuracy = create_and_fit_pipeline(task_type,
         params, x_train, y, x_val, y_val, model_save_path, dataset, data_collator, in_scaler, in_selector
     )
 
@@ -355,8 +380,8 @@ def process_params_torch(
             create_and_log_pr_curve(y_val, pos_probs, model_save_path)
 
         # Confusion matrix and classification report for any classification task
-        create_and_log_confusion_matrix(y_val, y_pred, model_save_path)
-        create_and_log_classification_report(y_val, y_pred, model_save_path)
+        # create_and_log_confusion_matrix(y_val, y_pred, model_save_path)
+        # create_and_log_classification_report(y_val, y_pred, model_save_path)
 
         # Extract training history from model if available
         try:
@@ -551,26 +576,28 @@ def kfold_training_with_process_params_torch(
 
 
 def get_best_run_from_hyperoptim(
-    results: List[Tuple[Dict, float, str]]
+    results: List[Tuple[Dict, float, str]],
+    maximize: bool = True
 ) -> Tuple[Dict, float, str]:
     """
     This function retrieves the best model run from the results of the hyperparameter optimization.
 
-    :param results: parameters, validation accuracy, and run ID for one run of the model
+    :param results: parameters, validation metric, and run ID for each model run
+    :param maximize: If True, selects the highest metric (e.g. accuracy); if False, selects the lowest (e.g. loss)
 
     :return: best_params: the best parameters from hyperparameter optimization
-             best_val_accuracy: highest validation accuracy achieved during hyperparameter
-             optimization
+             best_val_score: the best metric value
              best_run_id: ID of the best run
     """
-    # Retrieve the best model run
     best_params = {}
-    best_val_accuracy = -10
+    best_val_score = float("-inf") if maximize else float("inf")
     best_run_id = None
-    for params, val_accuracy, run_id in results:
-        if best_val_accuracy is None or val_accuracy > best_val_accuracy:
-            best_val_accuracy = val_accuracy
+
+    for params, val_score, run_id in results:
+        if (maximize and val_score > best_val_score) or (not maximize and val_score < best_val_score):
+            best_val_score = val_score
             best_params = params
             best_run_id = run_id
 
-    return best_params, best_val_accuracy, best_run_id
+    return best_params, best_val_score, best_run_id
+
